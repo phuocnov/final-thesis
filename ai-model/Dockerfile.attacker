@@ -1,0 +1,40 @@
+# Attack toolbox for dataset collection (driven by 05_run_attacks.sh against YOUR OWN
+# local cluster). Built locally and run as an unmeshed pod (attacker-pod.yaml).
+#
+#   docker build -f Dockerfile.attacker -t attacker:local .
+#
+# Tools:
+#   wrk          - HTTP load generator (request flood)
+#   ffuf         - path/endpoint fuzzer
+#   nmap/ncat    - port scan + raw-bytes sender (malformed HTTP)
+#   hping3       - SYN / UDP / ICMP / connection floods (needs NET_RAW)
+#   slowhttptest - slow-HTTP (Slowloris) attack
+#   curl, python3- injection payloads, brute force, low-rate flood, glue
+#
+# Pinned to a dated Debian tag for reproducibility; bump deliberately.
+FROM debian:bookworm-20250929-slim
+
+ARG FFUF_VERSION=2.1.0
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      wrk \
+      nmap \
+      ncat \
+      hping3 \
+      slowhttptest \
+      curl \
+      ca-certificates \
+      python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# ffuf: single static binary from the pinned GitHub release
+RUN curl -fsSL -o /tmp/ffuf.tar.gz \
+      "https://github.com/ffuf/ffuf/releases/download/v${FFUF_VERSION}/ffuf_${FFUF_VERSION}_linux_amd64.tar.gz" \
+ && tar -xzf /tmp/ffuf.tar.gz -C /usr/local/bin ffuf \
+ && rm /tmp/ffuf.tar.gz \
+ && chmod +x /usr/local/bin/ffuf
+
+WORKDIR /work
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["sleep infinity"]

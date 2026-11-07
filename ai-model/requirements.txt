@@ -1,0 +1,5 @@
+# Pinned so `pip install` is reproducible. The time-bucket code in build_dataset.py
+# works on both pandas 2 and 3 (it normalises datetime units), but pinning avoids
+# surprises from a future pandas changing defaults again.
+pandas==2.3.3
+networkx==3.3

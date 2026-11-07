@@ -1,0 +1,11 @@
+{
+  "name": "authservice",
+  "version": "0.1.0",
+  "description": "A mock authentication microservice that validates logins against a JSON file",
+  "repository": "https://github.com/GoogleCloudPlatform/microservices-demo",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "Apache-2.0"
+}

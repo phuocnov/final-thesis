@@ -1,0 +1,59 @@
+# L3/4 packet capture that runs ALONGSIDE Istio, giving an independent network-layer
+# view the Istio access logs cannot provide (SYN floods, UDP/ICMP, connect floods,
+# raw TTL/window/flags). See docs/build_dataset/l3-capture.md.
+#
+# Single-node minikube with the default bridge CNI: every pod veth is slaved to the
+# `bridge` interface, so one capture there sees ALL east-west pod<->pod traffic with
+# real pod IPs. `eth0` carries north-south (ingress / NodePort). We capture both.
+#
+# hostNetwork + NET_RAW/NET_ADMIN let tcpdump see the node's real interfaces. pcaps
+# land on a hostPath; 03_capture_pcap.sh copies them off the node.
+#
+# Apply/stop with ai-model/03_capture_pcap.sh (do not kubectl apply by hand).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pcap-capture
+  namespace: kube-system
+  labels: { app: pcap-capture }
+spec:
+  selector:
+    matchLabels: { app: pcap-capture }
+  template:
+    metadata:
+      labels: { app: pcap-capture }
+      annotations:
+        # Keep this pod OUT of the mesh: it must see raw node traffic, not be meshed.
+        sidecar.istio.io/inject: "false"
+    spec:
+      hostNetwork: true
+      # Tolerate a control-plane taint so it schedules on the single minikube node.
+      tolerations:
+        - operator: Exists
+      volumes:
+        - name: cap
+          hostPath: { path: /var/log/pcap-capture, type: DirectoryOrCreate }
+      containers:
+        # One container per interface; both write to the same hostPath dir.
+        - name: cap-bridge
+          image: nicolaka/netshoot:v0.13
+          securityContext:
+            capabilities: { add: ["NET_RAW", "NET_ADMIN"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              exec tcpdump -i bridge -s 0 -U
+              -G 300 -w /cap/bridge_%Y%m%d-%H%M%S.pcap
+              -Z root 'not port 15012 and not port 15014'
+          volumeMounts: [{ name: cap, mountPath: /cap }]
+        - name: cap-eth0
+          image: nicolaka/netshoot:v0.13
+          securityContext:
+            capabilities: { add: ["NET_RAW", "NET_ADMIN"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              exec tcpdump -i eth0 -s 0 -U
+              -G 300 -w /cap/eth0_%Y%m%d-%H%M%S.pcap
+              -Z root 'not port 22'
+          volumeMounts: [{ name: cap, mountPath: /cap }]

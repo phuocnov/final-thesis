@@ -1,0 +1,17 @@
+# Dependencies for two_view_hetero_gat.py (the model). Install into a venv:
+#
+#   python -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements-model.txt
+#
+# NOTE: torch / torch_geometric ship wheels only for supported Python versions
+# (3.9-3.13 as of this writing) -- NOT 3.14. If your system python is 3.14, create the
+# venv with an older interpreter, e.g.  python3.12 -m venv .venv
+#
+# torch is left unpinned so pip picks the right CPU/CUDA wheel for your platform; for a
+# CPU-only install you can use:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+numpy
+pandas==2.3.3
+networkx==3.3
+scikit-learn
+torch
+torch_geometric

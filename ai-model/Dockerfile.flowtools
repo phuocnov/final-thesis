@@ -1,0 +1,23 @@
+# Flow-feature extraction toolbox: Argus (the UNSW-NB15 extractor) + tcpdump.
+# Built locally and run with `docker run` by 04_pcap_to_flows.sh, because the Arch
+# host has none of these tools. Zeek is run from its own official image
+# (zeek/zeek), so it is intentionally not installed here.
+#
+#   docker build -f Dockerfile.flowtools -t flowtools:local .
+#
+# Pinned to a dated Debian tag for reproducibility; bump deliberately.
+FROM debian:bookworm-20250929-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      argus-client \
+      argus-server \
+      tcpdump \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# argus  : pcap  -> binary argus flow records
+# ra     : argus -> text/CSV flow records with selectable fields
+# racluster: argus -> aggregated bi-directional flows
+WORKDIR /work
+ENTRYPOINT ["/bin/bash", "-lc"]

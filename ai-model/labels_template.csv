@@ -1,0 +1,4 @@
+start_time,end_time,label,source_ip,match_ua,notes
+2026-01-01T00:00:00.000Z,2026-01-01T00:05:00.000Z,normal,,,loadgenerator baseline traffic
+2026-01-01T00:10:00.000Z,2026-01-01T00:10:30.000Z,http_flood,,atk-flood,ua-tagged attack (set your tool's User-Agent to contain atk-flood)
+2026-01-01T00:12:00.000Z,2026-01-01T00:12:30.000Z,port_scan,10.244.1.99,,in-cluster attacker pod (reliable source_ip from pcap/pod-to-pod)

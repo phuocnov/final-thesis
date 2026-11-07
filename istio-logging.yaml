@@ -1,0 +1,38 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    accessLogFile: /dev/stdout
+    accessLogEncoding: JSON
+    extensionProviders:
+      - name: json-access-log
+        envoyFileAccessLog:
+          path: /dev/stdout
+          logFormat:
+            labels:
+              ts: "%START_TIME%"
+              pod: "%ENVIRONMENT(POD_NAME)%"
+              ns: "%ENVIRONMENT(POD_NAMESPACE)%"
+              sa: "%ENVIRONMENT(SERVICE_ACCOUNT)%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              authority: "%REQ(:AUTHORITY)%"
+              protocol: "%PROTOCOL%"
+              user_agent: "%REQ(USER-AGENT)%"
+              request_id: "%REQ(X-REQUEST-ID)%"
+              xff: "%REQ(X-FORWARDED-FOR)%"
+              response_code: "%RESPONSE_CODE%"
+              response_flags: "%RESPONSE_FLAGS%"
+              response_code_details: "%RESPONSE_CODE_DETAILS%"
+              grpc_status: "%GRPC_STATUS%"
+              duration_ms: "%DURATION%"
+              req_duration_ms: "%REQUEST_DURATION%"
+              resp_duration_ms: "%RESPONSE_DURATION%"
+              bytes_rx: "%BYTES_RECEIVED%"
+              bytes_tx: "%BYTES_SENT%"
+              upstream_cluster: "%UPSTREAM_CLUSTER%"
+              upstream_host: "%UPSTREAM_HOST%"
+              upstream_local_addr: "%UPSTREAM_LOCAL_ADDRESS%"
+              downstream_remote_addr: "%DOWNSTREAM_REMOTE_ADDRESS%"
+              downstream_local_addr: "%DOWNSTREAM_LOCAL_ADDRESS%"
+              route_name: "%ROUTE_NAME%"

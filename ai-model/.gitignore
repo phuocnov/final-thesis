@@ -1,0 +1,14 @@
+# Python venv for the ai-model scripts (see requirements*.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# Generated capture / dataset artifacts (not source)
+session_*/
+logs/
+pcaps/
+dataset/
+pods_*.json
+labels.csv
+*.pcap
+*.argus

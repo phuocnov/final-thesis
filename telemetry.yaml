@@ -1,0 +1,10 @@
+# Apply AFTER the install above:  kubectl apply -f telemetry.yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: json-logging
+  namespace: istio-system   # root namespace = whole mesh, including the ingress gateway
+spec:
+  accessLogging:
+    - providers:
+        - name: json-access-log

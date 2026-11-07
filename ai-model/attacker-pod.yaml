@@ -1,0 +1,31 @@
+# Unmeshed attacker pod used by 05_run_attacks.sh to generate labeled attack traffic
+# against YOUR OWN local cluster. Deployed/removed by that script -- do not apply by hand.
+#
+# - sidecar.istio.io/inject: "false" keeps it OUT of the mesh, so its raw SYN/UDP/ICMP
+#   packets reach the wire unaltered (captured by the bridge pcap) and its pod IP is a
+#   reliable attacker source_ip for labeling.
+# - NET_RAW/NET_ADMIN let hping3/nmap craft raw packets.
+# - imagePullPolicy: IfNotPresent so the locally-built image is used (no registry).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+  namespace: default
+  labels:
+    app: attacker
+  annotations:
+    sidecar.istio.io/inject: "false"
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+  - name: attacker
+    image: attacker:local
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      capabilities:
+        add: ["NET_RAW", "NET_ADMIN"]
+    command: ["/bin/sh", "-c", "sleep infinity"]
+    resources:
+      requests: { cpu: "100m", memory: "64Mi" }
+      limits:   { cpu: "2",    memory: "512Mi" }
