@@ -81,7 +81,7 @@ docker build -f Dockerfile.flowtools -t flowtools:local .   # once
 ./03_capture_pcap.sh stop             # remove the capture pod
 
 # extract the independent L3/4 table (reuses the same labels.csv as the L7 build)
-./04_pcap_to_flows.sh pcaps/cap labels.csv dataset/netflows.csv
+./04_pcap_to_flows.sh pcaps labels.csv dataset/netflows.csv
 # optional Bro-derived fields:  ZEEK=1 ./04_pcap_to_flows.sh ...
 ```
 

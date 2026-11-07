@@ -7,16 +7,16 @@
 # from the SAME Istio logs as the L7 view and so is correlated by construction).
 #
 # Prereqs:
-#   - pcaps fetched by 03_capture_pcap.sh (default dir: ai-model/pcaps/cap)
+#   - pcaps fetched by 03_capture_pcap.sh (default dir: ai-model/pcaps)
 #   - flowtools image built:  docker build -f Dockerfile.flowtools -t flowtools:local .
 #   - labels.csv (same file the L7 build uses): start_time,end_time,label,source_ip,notes
 #
 # Usage:
 #   ./04_pcap_to_flows.sh [PCAP_DIR] [LABELS] [OUT]
-#   ./04_pcap_to_flows.sh pcaps/cap labels.csv dataset/netflows.csv
+#   ./04_pcap_to_flows.sh pcaps labels.csv dataset/netflows.csv
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PCAP_DIR="${1:-$HERE/pcaps/cap}"
+PCAP_DIR="${1:-$HERE/pcaps}"
 LABELS="${2:-$HERE/labels.csv}"
 OUT="${3:-$HERE/dataset/netflows.csv}"
 IMG="${FLOWTOOLS_IMG:-flowtools:local}"

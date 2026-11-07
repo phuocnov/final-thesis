@@ -51,8 +51,11 @@ docker build -f Dockerfile.flowtools -t flowtools:local .   # for the L3/4 build
 ## Usage
 
 ```sh
-./05_run_attacks.sh                      # full suite, 2 rounds, bounded-safe
-./05_run_attacks.sh --dry-run            # print every command + the labels rows, run nothing
+./05_run_attacks.sh                      # full suite, 2 rounds, bounded-safe (capture only)
+./05_run_attacks.sh --train              # ONE COMMAND: capture -> dataset -> train
+./05_run_attacks.sh --build              # capture -> dataset (no training)
+./05_run_attacks.sh --train --sweep      # ...and run the full comparison table
+./05_run_attacks.sh --dry-run --train    # print every command + the pipeline, run nothing
 ./05_run_attacks.sh --only brute_force,http_flood --rounds 1
 ./05_run_attacks.sh --no-l34             # L7 application attacks only (skip raw floods)
 ./05_run_attacks.sh --intense            # full-force floods (can crash a 1-node cluster)
@@ -67,8 +70,18 @@ docker build -f Dockerfile.flowtools -t flowtools:local .   # for the L3/4 build
 | `--skip a,b` | — | run all but these |
 | `--no-l34` | off | skip the raw-socket L4/L3 floods (SYN/UDP/ICMP/conn + scan) |
 | `--intense` | off | full-force floods instead of bounded-safe |
-| `--dry-run` | off | print commands + label rows, execute nothing |
+| `--build` | off | after the session, build the dataset (`build_dataset.py` + `04_pcap_to_flows.sh`) using the venv |
+| `--train` | off | `--build` **and** train (`two_view_hetero_gat.py`); needs the venv + `flowtools:local` + torch |
+| `--sweep` | off | with `--train`, run the full comparison table |
+| `--dry-run` | off | print commands + label rows (and the pipeline it would run), execute nothing |
 | `--out DIR` | `session_<UTC>` | session output directory |
+
+**One-command pipeline:** `--build`/`--train` run `build_dataset.py`,
+`04_pcap_to_flows.sh` and (with `--train`) `two_view_hetero_gat.py` automatically, using
+`ai-model/.venv/bin/python` — so you don't hit the system-Python `ModuleNotFoundError`.
+Prerequisites are checked **before** the capture (venv, `flowtools:local`, torch), so a
+missing dep fails fast instead of after a long session. A build/train failure never
+deletes the captured session.
 
 Attack names: `http_flood`, `http_flood_low`, `fuzzing`, `injection`, `brute_force`,
 `malformed_http`, `slow_http`, `port_scan`, `conn_flood`, `syn_flood`, `udp_flood`,
@@ -85,15 +98,22 @@ low-rate pass labeled `http_flood`, so the model can't just threshold on volume.
 
 ## After a session: build the dataset
 
-The script prints these with the real paths filled in:
+The script prints these with the real paths filled in. **Use the venv's Python**
+(`.venv/bin/python`) — the system Python has no pandas/networkx/torch; run from
+`ai-model/`:
 
 ```sh
-python build_dataset.py --logs session_<UTC>/logs --pods "session_<UTC>/pods_*.json" \
+# (one-time) create the venv + deps:  python3 -m venv .venv && .venv/bin/pip install -r requirements-model.txt
+.venv/bin/python build_dataset.py --logs session_<UTC>/logs --pods "session_<UTC>/pods_*.json" \
     --labels session_<UTC>/labels.csv --out_dir session_<UTC>/dataset
-./04_pcap_to_flows.sh session_<UTC>/pcaps/cap session_<UTC>/labels.csv session_<UTC>/dataset/netflows.csv
-python two_view_hetero_gat.py \
+./04_pcap_to_flows.sh session_<UTC>/pcaps session_<UTC>/labels.csv session_<UTC>/dataset/netflows.csv
+.venv/bin/python two_view_hetero_gat.py \
     --netflows session_<UTC>/dataset/netflows.csv --graphml session_<UTC>/dataset/observed_services.graphml
 ```
+
+> `ModuleNotFoundError: No module named 'networkx'` means you used the system Python —
+> prefix with `.venv/bin/python` (or `source .venv/bin/activate` first). `04_pcap_to_flows.sh`
+> uses only stdlib + docker, so it doesn't need the venv.
 
 ## Notes
 

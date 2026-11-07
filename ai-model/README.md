@@ -29,6 +29,7 @@ docker build -f Dockerfile.attacker  -t attacker:local  .
 docker build -f Dockerfile.flowtools -t flowtools:local .
 ./05_run_attacks.sh --dry-run      # review the exact commands first
 ./05_run_attacks.sh                # full suite, bounded-safe; prints the build commands at the end
+./05_run_attacks.sh --train        # ONE command: capture -> build dataset -> train (uses .venv)
 ```
 See [docs/build_dataset/attack-simulation.md](../docs/build_dataset/attack-simulation.md).
 The numbered steps below are the manual pipeline it automates (use them for custom runs).
@@ -143,7 +144,7 @@ docker build -f Dockerfile.flowtools -t flowtools:local .   # once
 # ... run baseline + attacks (see docs/build_dataset/attack-types.md), mark windows ...
 ./03_capture_pcap.sh fetch pcaps
 ./03_capture_pcap.sh stop
-./04_pcap_to_flows.sh pcaps/cap labels.csv dataset/netflows.csv
+./04_pcap_to_flows.sh pcaps labels.csv dataset/netflows.csv
 ```
 
 Output `dataset/netflows.csv` carries UNSW-style per-flow features

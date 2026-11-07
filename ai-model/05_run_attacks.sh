@@ -17,9 +17,13 @@
 #   ./05_run_attacks.sh --only brute_force,port_scan --rounds 1
 #   ./05_run_attacks.sh --no-l34                  # L7 application attacks only
 #   ./05_run_attacks.sh --intense                 # full-force floods (can crash 1 node)
-#   ./05_run_attacks.sh --dry-run                 # print every command + label rows, run nothing
+#   ./05_run_attacks.sh --build                   # also build the dataset (venv) after the session
+#   ./05_run_attacks.sh --train                   # one command: capture -> dataset -> train (implies --build)
+#   ./05_run_attacks.sh --train --sweep           # ...and run the full comparison table
+#   ./05_run_attacks.sh --dry-run [--train]       # print every command + label rows, run nothing
 #
-# After it finishes it prints the exact build_dataset.py / 04_pcap_to_flows.sh commands.
+# Without --build/--train it just prints the follow-up build_dataset.py / 04 / train
+# commands. --build/--train run them automatically using the ai-model/.venv python.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -30,6 +34,9 @@ GAP=45            # seconds of clean (normal-only) traffic between attacks
 INTENSE=0
 DRY=0
 NO_L34=0
+BUILD=0          # --build: build the dataset after the session
+TRAIN=0          # --train: build + train the model (implies BUILD)
+SWEEP=0          # --sweep: with --train, run the full comparison table
 ONLY=""
 SKIP=""
 OUT="$HERE/session_$(date -u +%Y%m%dT%H%M%SZ)"
@@ -54,11 +61,15 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --intense) INTENSE=1; shift ;;
         --no-l34) NO_L34=1; shift ;;
+        --build) BUILD=1; shift ;;
+        --train) TRAIN=1; BUILD=1; shift ;;   # train implies build
+        --sweep) SWEEP=1; shift ;;
         --dry-run) DRY=1; shift ;;
         -h|--help) usage 0 ;;
         *) echo "unknown arg: $1" >&2; usage 2 ;;
     esac
 done
+PY="$HERE/.venv/bin/python"   # the venv has pandas/networkx/torch; system python does not
 
 csv() { local IFS=,; echo "$*"; }
 contains() { case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac; }
@@ -109,10 +120,15 @@ attack_cmd() {
     esac
 }
 
-# ---- teardown (always) ----------------------------------------------------------
+# ---- finalize (stop capture, fetch pcaps, remove attacker) ----------------------
+# Called explicitly on the happy path (so pcaps are on disk BEFORE the build step),
+# and again via the EXIT trap as a safety net for interrupted runs. Idempotent.
 STREAM_PID=""
-teardown() {
-    echo; echo "==> teardown"
+FINALIZED=0
+finalize() {
+    [[ "$FINALIZED" == 1 ]] && return 0
+    FINALIZED=1
+    echo; echo "==> finalize (stop capture, fetch pcaps, remove attacker)"
     [[ -n "$STREAM_PID" ]] && kill "$STREAM_PID" 2>/dev/null || true
     if [[ $DRY == 0 ]]; then
         "$HERE/03_capture_pcap.sh" fetch "$OUT/pcaps" >/dev/null 2>&1 || true
@@ -120,7 +136,7 @@ teardown() {
         kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null 2>&1 || true
     fi
 }
-trap teardown EXIT INT TERM
+trap finalize EXIT INT TERM
 
 # ---- preconditions --------------------------------------------------------------
 SEL="$(build_selection)"
@@ -128,6 +144,24 @@ SEL="$(build_selection)"
 echo "session out : $OUT"
 echo "attacks     :$SEL"
 echo "rounds      : $ROUNDS | dur ${DUR}s | gap ${GAP}s | intense=$INTENSE | l34=$([[ $NO_L34 == 1 ]] && echo off || echo on)"
+echo "post        : build=$BUILD train=$TRAIN sweep=$SWEEP"
+
+# Fail fast on build/train prerequisites BEFORE the (long) capture, so we never
+# capture a full session and only then discover the venv/image is missing.
+FLOWTOOLS_OK=0
+if [[ $DRY == 0 && ( $BUILD == 1 || $TRAIN == 1 ) ]]; then
+    [[ -x "$PY" ]] || { echo "ERROR: venv python not found at $PY" >&2
+        echo "       create it:  python3 -m venv $HERE/.venv && $HERE/.venv/bin/pip install -r $HERE/requirements-model.txt" >&2; exit 1; }
+    if docker image inspect flowtools:local >/dev/null 2>&1; then FLOWTOOLS_OK=1; fi
+    if [[ $TRAIN == 1 ]]; then
+        [[ "$FLOWTOOLS_OK" == 1 ]] || { echo "ERROR: --train needs the L3/4 netflows, which need the flowtools:local image." >&2
+            echo "       build it:  docker build -f $HERE/Dockerfile.flowtools -t flowtools:local $HERE" >&2; exit 1; }
+        "$PY" -c 'import torch, torch_geometric' 2>/dev/null || { echo "ERROR: --train needs torch + torch_geometric in the venv." >&2
+            echo "       install:  $HERE/.venv/bin/pip install -r $HERE/requirements-model.txt" >&2; exit 1; }
+    elif [[ "$FLOWTOOLS_OK" == 0 ]]; then
+        echo "NOTE: flowtools:local image absent -> will build the L7 dataset only (no netflows.csv)."
+    fi
+fi
 
 mkdir -p "$OUT"
 LABELS="$OUT/labels.csv"
@@ -150,6 +184,12 @@ if [[ $DRY == 1 ]]; then
         done
     done
     echo; echo "would write labels.csv:"; cat "$LABELS"
+    if [[ $BUILD == 1 || $TRAIN == 1 ]]; then
+        echo; echo "then the pipeline would run (venv python):"
+        echo "    $PY build_dataset.py --logs $OUT/logs --pods '$OUT/pods_*.json' --labels $OUT/labels.csv --out_dir $OUT/dataset"
+        echo "    ./04_pcap_to_flows.sh $OUT/pcaps $OUT/labels.csv $OUT/dataset/netflows.csv"
+        [[ $TRAIN == 1 ]] && echo "    $PY two_view_hetero_gat.py --netflows $OUT/dataset/netflows.csv --graphml $OUT/dataset/observed_services.graphml --views both$([[ $SWEEP == 1 ]] && echo ' --sweep')"
+    fi
     exit 0
 fi
 
@@ -230,22 +270,52 @@ for r in $(seq 1 "$ROUNDS"); do
     done
 done
 
-# ---- done (teardown runs via trap) ----------------------------------------------
+# ---- session done: finalize capture BEFORE any post-processing ------------------
 echo
 echo "==> session complete. labels.csv:"
 cat "$LABELS"
+finalize    # stop capture + fetch pcaps now, so build_dataset/04 see the data
+
+# ---- optional pipeline: build the dataset (+ train) -----------------------------
+if [[ $BUILD == 1 || $TRAIN == 1 ]]; then
+    echo; echo "==> [1/3] build L7 dataset (build_dataset.py)"
+    "$PY" build_dataset.py --logs "$OUT/logs" --pods "$OUT/pods_*.json" \
+        --labels "$LABELS" --out_dir "$OUT/dataset" || { echo "build_dataset failed; session kept at $OUT" >&2; exit 1; }
+
+    if [[ "$FLOWTOOLS_OK" == 1 ]]; then
+        echo; echo "==> [2/3] build L3/4 dataset (04_pcap_to_flows.sh -> netflows.csv)"
+        "$HERE/04_pcap_to_flows.sh" "$OUT/pcaps" "$LABELS" "$OUT/dataset/netflows.csv" \
+            || { echo "04_pcap_to_flows failed; session + L7 dataset kept at $OUT" >&2; exit 1; }
+    else
+        echo; echo "==> [2/3] skipped netflows (no flowtools:local image) -- L7 dataset only"
+    fi
+
+    if [[ $TRAIN == 1 ]]; then
+        echo; echo "==> [3/3] train (two_view_hetero_gat.py)"
+        "$PY" two_view_hetero_gat.py --netflows "$OUT/dataset/netflows.csv" \
+            --graphml "$OUT/dataset/observed_services.graphml" --views both \
+            $([[ $SWEEP == 1 ]] && echo --sweep) \
+            || { echo "training failed; dataset kept at $OUT/dataset" >&2; exit 1; }
+    fi
+    echo; echo "==> pipeline done. outputs in: $OUT/dataset"
+    exit 0
+fi
+
+# ---- no --build/--train: just point at the follow-up commands -------------------
 cat <<EOF
 
-Next steps (build the dataset from this session):
+Next steps (build the dataset from this session). Run from $HERE;
+.venv/bin/python has the deps (system python does NOT). Or re-run with --build / --train
+to do this automatically next time.
 
   # L7 view
-  python build_dataset.py --logs "$OUT/logs" --pods "$OUT/pods_*.json" \\
+  .venv/bin/python build_dataset.py --logs "$OUT/logs" --pods "$OUT/pods_*.json" \\
       --labels "$LABELS" --out_dir "$OUT/dataset"
 
-  # L3/4 view (needs flowtools:local image)
-  ./04_pcap_to_flows.sh "$OUT/pcaps/cap" "$LABELS" "$OUT/dataset/netflows.csv"
+  # L3/4 view (needs flowtools:local image; uses only stdlib python)
+  ./04_pcap_to_flows.sh "$OUT/pcaps" "$LABELS" "$OUT/dataset/netflows.csv"
 
   # train
-  python two_view_hetero_gat.py \\
+  .venv/bin/python two_view_hetero_gat.py \\
       --netflows "$OUT/dataset/netflows.csv" --graphml "$OUT/dataset/observed_services.graphml"
 EOF
