@@ -18,15 +18,41 @@ against **your own** local cluster and produces a complete, labeled capture sess
 4. Runs the selected attacks, one at a time, each in its own window with a clean
    normal-traffic gap between them, repeated for `--rounds` so every class lands across
    the session (helps the model's temporal train/val/test split).
-5. Writes `labels.csv` automatically using the entry-point scheme:
-   - **L7 attacks** → `match_ua=atk-<label>` (a per-attack `User-Agent` the parser keys
-     on — tags exactly the attacker's requests, not fan-out).
-   - **L4/L3 + malformed/slow** (no usable UA) → `source_ip=<attacker pod IP>` + time.
+5. Writes `labels.csv` automatically. Every row carries `source_ip=<attacker pod IP>`
+   (so `04_pcap_to_flows.sh` tags **only the attacker's own flows**, not normal background
+   in the window), and L7 attacks **also** carry `match_ua=atk-<label>` — a per-attack
+   `User-Agent` that `build_dataset.py` keys the L7 label on (exact attacker requests, not fan-out).
+   Each attack's stdout/stderr goes to `attacks/r<round>_<attack>.log`; a window that ends
+   far short of `--dur` prints a `WARN` and gets a `short` note.
 6. Stops + fetches the pcaps, kills the log stream, deletes the attacker pod.
 7. Prints the exact `build_dataset.py` / `04_pcap_to_flows.sh` commands for the session.
 
-Everything lands in a timestamped `ai-model/session_<UTC>/` directory: `logs/`,
-`pcaps/`, `pods_*.json`, and `labels.csv`.
+Everything lands in a timestamped `ai-model/session_<split>_<UTC>/` directory: `logs/`,
+`pcaps/`, `attacks/`, `pods_*.json`, `split.txt`, and `labels.csv`.
+
+## Train / validation / test: three separate sessions
+
+The model splits were previously one session cut 60/20/20 by time, so whichever classes
+happened to fall in the last 20% were the only ones tested — and validation (which picks
+the best epoch) could miss classes entirely. Capture **three independent sessions** instead,
+each class-complete, with `--split`:
+
+```sh
+./05_run_attacks.sh --split train --rounds 2 --build   # most data
+./05_run_attacks.sh --split val   --rounds 1 --build   # its own validation data
+./05_run_attacks.sh --split test  --rounds 1 --build   # its own held-out test data
+.venv/bin/python two_view_hetero_gat.py \
+    --netflows      session_train_<UTC>/dataset/netflows.csv \
+    --graphml       session_train_<UTC>/dataset/observed_services.graphml \
+    --val_netflows  session_val_<UTC>/dataset/netflows.csv \
+    --test_netflows session_test_<UTC>/dataset/netflows.csv \
+    --explain       session_test_<UTC>/explain
+```
+
+The featurisation (numeric scaling, proto/state levels, port→service mapping, class list)
+is fit on the **training** session only and reused on val/test, and each split is its own
+graph, so test flows never leak into training. The training session's `observed_services.graphml`
+is used for every split (the app topology is the same across sessions).
 
 ## Prerequisites
 
@@ -63,9 +89,11 @@ docker build -f Dockerfile.flowtools -t flowtools:local .   # for the L3/4 build
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--split train\|val\|test` | train | role of this session; names the dir `session_<split>_<UTC>` |
 | `--rounds N` | 2 | how many times to cycle the suite (spreads each class over time) |
 | `--dur S` | 30 | seconds per attack |
 | `--gap S` | 45 | seconds of clean normal traffic between attacks |
+| `--min_flows N` | 50 | warn if a selected attack yields fewer labeled flows (the "enough data?" check) |
 | `--only a,b` | — | run only these attacks |
 | `--skip a,b` | — | run all but these |
 | `--no-l34` | off | skip the raw-socket L4/L3 floods (SYN/UDP/ICMP/conn + scan) |
@@ -124,3 +152,11 @@ The script prints these with the real paths filled in. **Use the venv's Python**
   label rows, so you can audit the session without touching the cluster.
 - **Baseline matters:** leave the demo `loadgenerator` running so the gaps are real
   normal traffic; the script does not stop it.
+- **Check `attacks/*.log` and the WARN lines.** If an attack ends in well under `--dur`
+  (a `short` note in `labels.csv`, or a `WARN:` line), the tool failed — read its log and
+  re-run. After `--build`, the script also prints per-class netflow counts and warns about
+  any class under `--min_flows`.
+- **Recapture needed for old sessions:** sessions captured before this fix have **no** L3/4
+  attack flows (nmap/hping3 ran with an unset target and exited instantly) and over-broad
+  L3/4 labels (UA attacks wrote a blank `source_ip`, so every flow in the window was tagged).
+  Re-run the three `--split` sessions above to get a clean dataset.

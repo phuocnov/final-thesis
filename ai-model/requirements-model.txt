@@ -15,3 +15,4 @@ networkx==3.3
 scikit-learn
 torch
 torch_geometric
+matplotlib     # --explain figures (optional; CSV is written without it)

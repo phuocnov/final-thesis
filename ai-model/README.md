@@ -31,7 +31,21 @@ docker build -f Dockerfile.flowtools -t flowtools:local .
 ./05_run_attacks.sh                # full suite, bounded-safe; prints the build commands at the end
 ./05_run_attacks.sh --train        # ONE command: capture -> build dataset -> train (uses .venv)
 ```
-See [docs/build_dataset/attack-simulation.md](../docs/build_dataset/attack-simulation.md).
+
+**Preferred: capture three separate sessions** (train / validation / test), each
+class-complete, so the model is validated and tested on data that holds every attack type —
+not just whichever classes land in the tail of a single session:
+```
+./05_run_attacks.sh --split train --rounds 2 --build   # most data
+./05_run_attacks.sh --split val   --rounds 1 --build   # its own validation data
+./05_run_attacks.sh --split test  --rounds 1 --build   # its own held-out test data
+```
+Each session lands in `session_<split>_<UTC>/`. Every attack's output is saved under
+`attacks/r<round>_<attack>.log`, every `labels.csv` row carries the attacker `source_ip`
+(L7 attacks also a `match_ua` tag), and the script prints a `WARN` (and a `short` note) if
+an attack ends well under `--dur` — check those before trusting the data. See
+[docs/build_dataset/attack-simulation.md](../docs/build_dataset/attack-simulation.md).
+
 The numbered steps below are the manual pipeline it automates (use them for custom runs).
 
 ## 1. One-time per session: snapshot pod IPs
@@ -62,32 +76,35 @@ each run to get accurate UTC timestamps without doing date math, and paste
 those into `labels.csv`:
 
 ```
-start_time,end_time,label,source_ip,notes
-2026-01-01T00:00:00Z,2026-01-01T00:05:00Z,normal,,loadgenerator baseline
-2026-01-01T00:10:00Z,2026-01-01T00:10:30Z,http_flood,203.0.113.5,...
+start_time,end_time,label,source_ip,match_ua,notes
+2026-01-01T00:00:00Z,2026-01-01T00:05:00Z,normal,,,loadgenerator baseline
+2026-01-01T00:10:00Z,2026-01-01T00:10:30Z,http_flood,,atk-http_flood,ua-tagged attack (set your tool's User-Agent to contain atk-http_flood)
+2026-01-01T00:12:00Z,2026-01-01T00:12:30Z,port_scan,10.244.1.99,,in-cluster attacker pod (reliable source_ip)
 ```
 
-**Leave `source_ip` blank for anything that enters through the ingress gateway.**
-Once traffic passes the gateway, every internal service sees the *gateway's*
-pod IP as `downstream_remote_addr`, not the real external client — so two
-different external attacks, or an attack and a legitimate external user,
-can be indistinguishable by IP at that point. `source_ip` only reliably
-identifies a single sender for traffic generated *from inside the cluster*
-(pod-to-pod), where pod IPs stay unique within a snapshot window. For
-anything launched from your laptop or another machine outside the cluster,
-match by time window alone (blank `source_ip`) and make sure nothing else
-is generating traffic during that window.
+The two label keys (mirror `labels_template.csv`):
+- **`match_ua`** — a substring of the attacker's `User-Agent`. `build_dataset.py` tags
+  exactly the requests carrying it (the entry request, not fan-out). Best for L7 attacks:
+  set your tool's `User-Agent` to contain it.
+- **`source_ip`** — the attacker's address. In the pcap (`netflows.csv`) this reliably
+  identifies an **in-cluster** sender (pod IPs are unique within a snapshot), so `05_run_attacks.sh`
+  runs attacks from an in-cluster attacker pod and records its IP on every row. For traffic
+  from outside the cluster, every internal service sees the *gateway's* pod IP instead of the
+  real client, so an external `source_ip` can't separate senders — use `match_ua` and a clean
+  time window there.
 
-Run each attack from its own window with nothing else happening at the same
-time, so the labels stay clean. A few minutes of normal traffic between
-attacks is worth having too.
+Run each attack in its own window with nothing else generating load (except the baseline
+`loadgenerator`), so the labels stay clean. A few minutes of normal traffic between attacks
+is worth having too.
 
 ## 4. Build the dataset
+Install the deps into a venv once (this box's system Python is externally managed, so a bare
+`pip install` is blocked), then use that venv's Python:
 ```
-pip install pandas networkx
-python build_dataset.py --logs logs --pods pods_*.json --labels labels.csv --out_dir dataset
+python3 -m venv .venv && .venv/bin/pip install -r requirements-model.txt
+.venv/bin/python build_dataset.py --logs logs --pods pods_*.json --labels labels.csv --out_dir dataset
 ```
-Run `python build_dataset.py --selftest` any time to check the parser still
+Run `.venv/bin/python build_dataset.py --selftest` any time to check the parser still
 works (no cluster needed) before trusting it on your real logs.
 
 Output in `dataset/`:
@@ -97,7 +114,11 @@ Output in `dataset/`:
   (request count, bytes, duration, error count, majority label).
 - **`observed_services.graphml`** — the service-call graph **actually
   observed** in your traffic. Use this in place of the FTGO GraphML:
-  `python two_view_hetero_gat.py --graphml dataset/observed_services.graphml ...`
+  `.venv/bin/python two_view_hetero_gat.py --graphml dataset/observed_services.graphml ...`
+- **`observed_services_yed.graphml`** — the same graph with yFiles labels, colors and a
+  layout, for opening in [yEd](https://www.yworks.com/products/yed) (the plain file shows as
+  one unlabeled box there). Convert an existing file with
+  `.venv/bin/python build_dataset.py --to_yed dataset/observed_services.graphml`.
 
 ## Fixed after reviewing a real sample log line
 
@@ -154,19 +175,31 @@ sloss, dloss, smeansz, dmeansz, sjit, djit, tcprtt, synack, ackdat`, `proto`,
 
 ## What to do with it
 
-For the **captured L3/4 + L7 two-view** run (`netflows.csv` supersedes the
-derived `flows.csv`):
+The model trains on captured data only (no UNSW-NB15). Install its deps into a venv first:
+`python3 -m venv .venv && .venv/bin/pip install -r requirements-model.txt` (torch needs
+Python ≤ 3.13 — see that file).
 
+**Preferred: train / validate / test on the three separate sessions** from the
+"Quickest path" above, so each split holds every attack class and test data never leaks
+into training (the featuriser is fit on the training session and each split is its own graph):
 ```
-python two_view_hetero_gat.py \
+.venv/bin/python two_view_hetero_gat.py \
+    --netflows      session_train_<UTC>/dataset/netflows.csv \
+    --graphml       session_train_<UTC>/dataset/observed_services.graphml \
+    --val_netflows  session_val_<UTC>/dataset/netflows.csv \
+    --test_netflows session_test_<UTC>/dataset/netflows.csv \
+    --explain       session_test_<UTC>/explain      # per-alert L3/4-vs-L7 attention: CSV + PNGs
+```
+
+**Single session** (fallback): one `--netflows` with no val/test files splits it 60/20/20 by
+time. Simplest, but whichever classes fall in the last 20% are the only ones tested — the
+script warns about this.
+```
+.venv/bin/python two_view_hetero_gat.py \
     --netflows dataset/netflows.csv \
     --graphml  dataset/observed_services.graphml \
-    --views both        # or l34 / l7 / none; add --sweep for the full table
+    --views both        # or l34 / l7 / none; add --sweep for the full comparison table
 ```
-The model uses only this captured data (no UNSW-NB15). Install its deps into a venv
-first: `pip install -r requirements-model.txt` (torch needs Python ≤ 3.13 — see that file).
 
-`build_from_capture()` (now implemented) reads `netflows.csv` into the same
-structure the UNSW loader produced, keeping the two views as separate tables
-fused in-model via shared host/service nodes — no change to the model itself.
-The older UNSW path still works via the default `--source unsw`.
+`netflows.csv` (the real L3/4 view from Argus) supersedes the derived `flows.csv`. The two
+views stay separate tables fused in-model via shared host/service nodes.
