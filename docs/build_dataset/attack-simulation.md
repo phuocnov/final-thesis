@@ -54,6 +54,22 @@ is fit on the **training** session only and reused on val/test, and each split i
 graph, so test flows never leak into training. The training session's `observed_services.graphml`
 is used for every split (the app topology is the same across sessions).
 
+Or do the whole thing in one command — build any missing datasets and run the comparison:
+```sh
+./06_build_and_compare.sh                    # l34 / l7 / both over the newest 3 sessions
+./06_build_and_compare.sh --sweep            # full 7-config table (adds the shuffled/random controls)
+./06_build_and_compare.sh --cpu              # if the GPU OOMs
+```
+
+> **Capture all three splits with the SAME flags.** Same `--intense` (or all bounded) and
+> similar `--rounds`, or train and test come from different traffic distributions and the
+> comparison is meaningless (e.g. an `--intense` train is ~84% attack while a bounded test is
+> ~6%). Flood intensity mostly changes the *attack* counts; the graph size is dominated by the
+> huge `normal` class (loadgenerator + mesh chatter), which can reach ~1M flows per session.
+> `two_view_hetero_gat.py --max_normal N` caps the normal class per split (keeping **all** attack
+> flows) to fit GPU memory and ease the imbalance; `--device cpu` runs on system RAM instead.
+> `06_build_and_compare.sh` defaults to `--max-normal 150000`.
+
 ## Prerequisites
 
 ```sh

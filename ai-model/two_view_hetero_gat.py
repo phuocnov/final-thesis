@@ -151,10 +151,19 @@ def fit_capture(netflows, drop_strong=False, multiclass=False, n_flows=0, top_po
                 cat_order=cat_order, classes=classes, multiclass=multiclass, drop_strong=drop_strong)
 
 
-def transform_capture(feat, netflows, n_flows=0):
+def transform_capture(feat, netflows, n_flows=0, max_normal=0):
     """Apply a fitted featuriser (from fit_capture) to a session -> the flow dict the model consumes.
-    The L7 side stays separate: observed_services.graphml is loaded by load_service_graph and fused in-model."""
+    The L7 side stays separate: observed_services.graphml is loaded by load_service_graph and fused in-model.
+    max_normal>0 downsamples the 'normal' class to at most that many rows (keeping ALL attack flows), which
+    caps the graph size for GPU memory and tames the usual ~94%-normal imbalance."""
     df = _read_capture(netflows, n_flows)
+    if max_normal:
+        is_norm = df['label'].str.lower() == 'normal'
+        if int(is_norm.sum()) > max_normal:
+            keep_norm = np.random.default_rng(0).choice(df.index[is_norm].to_numpy(),
+                                                        size=max_normal, replace=False)
+            keep = np.concatenate([df.index[~is_norm].to_numpy(), keep_norm])
+            df = df.loc[np.sort(keep)].reset_index(drop=True)   # keep temporal order (index was stime-sorted)
     num = feat['num']
     xn = (np.log1p(df[num].values.astype(np.float64)) - feat['mean']) / feat['std']
     cols = []                                                     # proto/state dummies aligned to train levels (+ 'other')
@@ -468,6 +477,11 @@ def main():
     ap.add_argument('--test_netflows', metavar='FILE',
                     help='separate test session netflows.csv. Omit for the single-session 60/20/20 split.')
     ap.add_argument('--n_flows', type=int, default=0, help='cap number of flows (0 = all)')
+    ap.add_argument('--max_normal', type=int, default=0,
+                    help='downsample the normal class to at most N rows per split (keeps ALL attack flows); '
+                         '0 = off. Caps graph size for GPU memory and eases the ~94%% normal imbalance.')
+    ap.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'],
+                    help='auto = cuda if available else cpu; cpu avoids GPU OOM on large graphs')
     ap.add_argument('--views', default='both', choices=list(VIEWS),
                     help="none = flow-features-only MLP baseline; l34 / l7 / both = graph views")
     ap.add_argument('--mapping', default='port', choices=list(MAPPINGS),
@@ -488,7 +502,14 @@ def main():
     seeds = [int(s) for s in a.seeds.split(',') if s.strip()]
     assert not a.explain or (a.views == 'both' and not a.sweep), \
         '--explain needs --views both and cannot be combined with --sweep'
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if a.device == 'cuda':
+        assert torch.cuda.is_available(), '--device cuda but no CUDA device is available'
+        dev = torch.device('cuda')
+    elif a.device == 'cpu':
+        dev = torch.device('cpu')
+    else:
+        dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'device: {dev}')
     global M2
     M2 = 'AUC' if a.task == 'binary' or a.demo else 'Acc'
 
@@ -511,11 +532,14 @@ def main():
         feat = fit_capture(a.netflows, drop_strong=a.drop_strong, multiclass=mc, n_flows=a.n_flows)
         svc = load_service_graph(a.graphml)
         cat_order, classes, n_cls = feat['cat_order'], feat['classes'], len(feat['classes'])
-        fl_tr = transform_capture(feat, a.netflows, a.n_flows)
+        fl_tr = transform_capture(feat, a.netflows, a.n_flows, max_normal=a.max_normal)
+        if a.max_normal:
+            print(f'note: normal class downsampled to <= {a.max_normal:,} per split '
+                  '(all attack flows kept); test rates are at the capped base rate')
         if a.test_netflows:                                   # separate test session (inductive)
-            fl_te = transform_capture(feat, a.test_netflows)
+            fl_te = transform_capture(feat, a.test_netflows, max_normal=a.max_normal)
             if a.val_netflows:                                # separate val session too
-                fl_va = transform_capture(feat, a.val_netflows)
+                fl_va = transform_capture(feat, a.val_netflows, max_normal=a.max_normal)
                 splits = {'train': (fl_tr, None), 'val': (fl_va, None), 'test': (fl_te, None)}
             else:                                             # val = last 20% of train by time
                 n = len(fl_tr['y']); cut = int(.8 * n); idx = np.arange(n)

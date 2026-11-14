@@ -179,6 +179,11 @@ The model trains on captured data only (no UNSW-NB15). Install its deps into a v
 `python3 -m venv .venv && .venv/bin/pip install -r requirements-model.txt` (torch needs
 Python ≤ 3.13 — see that file).
 
+**One command for all of it:** `./06_build_and_compare.sh` auto-picks the newest
+train/val/test sessions, builds any missing `dataset/`, and prints the `l34` / `l7` / `both`
+comparison (`--sweep` for the full 7-config table, `--explain` for the per-alert figures).
+It defaults to `--max-normal 150000` and honors `--cpu`.
+
 **Preferred: train / validate / test on the three separate sessions** from the
 "Quickest path" above, so each split holds every attack class and test data never leaks
 into training (the featuriser is fit on the training session and each split is its own graph):
@@ -188,8 +193,15 @@ into training (the featuriser is fit on the training session and each split is i
     --graphml       session_train_<UTC>/dataset/observed_services.graphml \
     --val_netflows  session_val_<UTC>/dataset/netflows.csv \
     --test_netflows session_test_<UTC>/dataset/netflows.csv \
+    --max_normal 150000 \   # cap the normal class (keeps ALL attacks): fits a small GPU + eases the ~94% imbalance
+    --device cpu \          # optional: run on CPU if the GPU OOMs on large graphs
     --explain       session_test_<UTC>/explain      # per-alert L3/4-vs-L7 attention: CSV + PNGs
 ```
+
+> **Capture all three splits with the SAME flags** (same `--intense`/bounded, same `--rounds`),
+> or train and test come from different traffic distributions and the comparison is invalid.
+> The datasets are mostly `normal` (~90%+) and can reach ~1M flows; `--max_normal N` caps the
+> normal class per split while keeping every attack flow, and `--device cpu` sidesteps GPU memory limits.
 
 **Single session** (fallback): one `--netflows` with no val/test files splits it 60/20/20 by
 time. Simplest, but whichever classes fall in the last 20% are the only ones tested — the

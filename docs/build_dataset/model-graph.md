@@ -215,6 +215,11 @@ in that case. Validation always drives the best-epoch checkpoint.
 The test report prints, in binary mode, the **detection rate per original attack label**
 (`_per_class_report`), so it's visible which attacks are actually caught.
 
+Captured sessions are mostly `normal` (~90%+) and can reach ~1M flows, which both OOMs a small
+GPU and skews training. `--max_normal N` downsamples the normal class per split (keeping **all**
+attack flows) to cap graph size and ease the imbalance; the test set is then reported at that
+capped base rate. `--device cpu|cuda|auto` chooses where to run (CPU avoids GPU memory limits).
+
 ---
 
 ## 5. Why this shape (thesis framing)
