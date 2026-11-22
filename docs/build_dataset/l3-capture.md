@@ -132,11 +132,15 @@ verification step 2 and is worth capturing for the thesis.
 
 ## 7. Limits and cleanup
 
-- **Capture volume:** pcaps rotate every 5 minutes; a sustained flood produces large
-  files. The node has ~243 GB free, but watch it and `fetch`/clear between sessions.
-- **Leftover pcaps on the node:** `stop` removes the pod but leaves
-  `/var/log/pcap-capture` on the minikube node. Clear it with
-  `minikube ssh -- sudo rm -rf /var/log/pcap-capture` once you've fetched what you need.
+- **Capture volume:** the capture is **headers-only** (`tcpdump -s 128` in
+  `capture-daemonset.yaml`) — Argus needs only L3/4 headers and the mTLS payloads are
+  encrypted anyway, so a full session is a few GB instead of tens of GB. pcap keeps each
+  packet's original wire length, so byte/packet counts stay correct. pcaps rotate every 5
+  minutes; still `fetch`/clear between sessions. (A full-payload `-s 0` capture ballooned a
+  17-min session to 47 GB, which also made `kubectl cp` crawl.)
+- **Leftover pcaps on the node:** `stop` removes the pod but leaves `/var/log/pcap-capture`
+  on the minikube node. `05_run_attacks.sh` auto-purges it after a successful `fetch`; do it
+  by hand with `./03_capture_pcap.sh clean` (or `minikube ssh -- sudo rm -rf /var/log/pcap-capture`).
 - **Argus↔UNSW parity is close, not exact** (the per-feature mapping isn't fully
   documented upstream). `build_from_capture()` tolerates missing columns rather than
   assuming all are present, so a changed Argus field set won't crash the build.

@@ -366,7 +366,7 @@ def run_once(splits, svc, n_cls, classes, views, mapping, seed, a, dev, cat_orde
         if verbose and n_cls == 2:
             _per_class_report(meta_te['label'].values, pred)
         if explain_dir:
-            write_explain(explain_dir, meta_te, te_idx, t, p, pred, b, classes)
+            write_explain(explain_dir, meta_te, te_idx, t, p, pred, b, classes, view=views)
     return f1t, auct, (None if beta is None else beta.cpu().numpy())
 
 
@@ -379,26 +379,33 @@ def _per_class_report(labels, pred):
         print(f'    {lab:<18} {g["alert"].mean():.3f}  ({tag}, n={len(g)})')
 
 
-def write_explain(out_dir, meta, flow_idx, y_true, p, pred, beta, classes):
-    """Per-alert view attribution: one CSV row per test flow + PNG figures.
-    beta[:, 0] = weight on the L3/4 host view, beta[:, 1] = weight on the L7 service view."""
+def write_explain(out_dir, meta, flow_idx, y_true, p, pred, beta, classes, view='both'):
+    """Per-view test-set explanation: one CSV row per test flow + PNG figures.
+
+    Always writes diagnostic plots that make sense for ANY view (per-class detection, score
+    separation, score-by-label). When `beta` is given (only `--views both` produces it), also
+    writes the L3/4-vs-L7 attention attribution: beta[:, 0] = L3/4 host-view weight,
+    beta[:, 1] = L7 service-view weight."""
     os.makedirs(out_dir, exist_ok=True)
     normal = next((i for i, c in enumerate(classes) if str(c).lower() == 'normal'), None)
+    pcol = 'p_attack' if len(classes) == 2 else 'p_pred'
     df = meta.copy()
     df.insert(0, 'flow_idx', flow_idx)
     df['y_true'] = [classes[i] for i in y_true]
-    df['p_attack' if len(classes) == 2 else 'p_pred'] = p
+    df[pcol] = p
     df['pred'] = [classes[i] for i in pred]
     df['is_alert'] = pred != normal
-    df['beta_l34'], df['beta_l7'] = beta[:, 0], beta[:, 1]
-    df['dominant_view'] = np.where(df['beta_l7'] > 0.5, 'L7', 'L3/4')
+    df['label'] = df['label'].astype(str)          # original attack label, for grouping
+    has_beta = beta is not None
+    if has_beta:
+        df['beta_l34'], df['beta_l7'] = beta[:, 0], beta[:, 1]
+        df['dominant_view'] = np.where(df['beta_l7'] > 0.5, 'L7', 'L3/4')
     csv_path = os.path.join(out_dir, 'explanations.csv')
     df.to_csv(csv_path, index=False)
-    pcol = 'p_attack' if len(classes) == 2 else 'p_pred'
 
     al = df[df['is_alert']]
-    print(f'\nexplain: {len(df):,} test flows, {len(al):,} alerts -> {csv_path}')
-    if len(al):
+    print(f'\nexplain [{view}]: {len(df):,} test flows, {len(al):,} alerts -> {csv_path}')
+    if has_beta and len(al):
         share = al['dominant_view'].value_counts(normalize=True)
         print('  alerts dominated by: ' + ', '.join(f'{k} {v:.1%}' for k, v in share.items()))
         print('  mean L7 weight per label (alerts):')
@@ -414,54 +421,103 @@ def write_explain(out_dir, meta, flow_idx, y_true, p, pred, beta, classes):
         return
 
     C34, C7 = '#2a9d8f', '#8250df'
-    # 1) per attack label: which view drives the alerts
-    if len(al):
-        labs = al.groupby('label')['beta_l7'].median().sort_values().index.tolist()
-        fig, ax = plt.subplots(figsize=(8, 0.45 * len(labs) + 1.6))
-        ax.boxplot([al.loc[al['label'] == l, 'beta_l7'] for l in labs], orientation='horizontal', showfliers=False)
-        ax.set_yticks(range(1, len(labs) + 1), [f'{l} (n={int((al["label"] == l).sum())})' for l in labs])
-        ax.axvline(0.5, color='grey', ls='--', lw=1)
-        ax.set_xlim(0, 1)
-        ax.set_xlabel('L7 view weight  (0 = all L3/4, 1 = all L7)')
-        ax.set_title('Which view drives the alerts, per true label')
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'view_by_class.png'), dpi=150); plt.close(fig)
+    C_ATK, C_NORM = '#e76f51', '#999999'
+    written = []
 
-    # 2) distribution: alerts vs non-alerts
+    def _lab_ticks(labs):
+        return [f'{l} (n={int((df["label"] == l).sum())})' for l in labs]
+
+    # ---- diagnostic plots: produced for EVERY view -----------------------------------
+    # D1) per-class alert rate (detection for attacks, false-alarm for normal)
+    rate = df.groupby('label')['is_alert'].mean().sort_values()
+    fig, ax = plt.subplots(figsize=(8, 0.42 * len(rate) + 1.6))
+    colors = [C_NORM if str(l).lower() == 'normal' else C_ATK for l in rate.index]
+    ax.barh(range(len(rate)), rate.values, color=colors)
+    ax.set_yticks(range(len(rate)), _lab_ticks(rate.index))
+    for i, r in enumerate(rate.values):
+        ax.text(min(r + .01, .98), i, f'{r:.2f}', va='center', fontsize=7)
+    ax.set_xlim(0, 1)
+    ax.set_xlabel('alert rate  (detection for attacks / false-alarm for normal)')
+    ax.set_title(f'[{view}] per-class alert rate (test)')
+    fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'detection_by_class.png'), dpi=150); plt.close(fig)
+    written.append('detection_by_class.png')
+
+    # D2) score separation: true-normal vs true-attack
+    is_norm_true = df['label'].str.lower() == 'normal'
     fig, ax = plt.subplots(figsize=(7, 4))
     bins = np.linspace(0, 1, 41)
-    ax.hist(df.loc[~df['is_alert'], 'beta_l7'], bins=bins, alpha=.6, label='not alerted', color='#999999')
-    if len(al):
-        ax.hist(al['beta_l7'], bins=bins, alpha=.7, label='alerts', color=C7)
-    ax.axvline(0.5, color='black', ls='--', lw=1)
-    ax.set_xlabel('L7 view weight'); ax.set_ylabel('flows'); ax.legend()
-    ax.set_title('Per-flow view attention (test set)')
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'view_hist.png'), dpi=150); plt.close(fig)
+    ax.hist(df.loc[is_norm_true, pcol], bins=bins, alpha=.6, label=f'true normal (n={int(is_norm_true.sum())})', color=C_NORM)
+    ax.hist(df.loc[~is_norm_true, pcol], bins=bins, alpha=.6, label=f'true attack (n={int((~is_norm_true).sum())})', color=C_ATK)
+    ax.set_xlabel(pcol); ax.set_ylabel('flows'); ax.legend()
+    ax.set_title(f'[{view}] score separation (test)')
+    fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'score_hist.png'), dpi=150); plt.close(fig)
+    written.append('score_hist.png')
 
-    # 3) top alerts as stacked bars
-    if len(al):
-        top = al.sort_values(pcol, ascending=False).head(30).iloc[::-1]
-        names = [f'#{r.flow_idx} {r.label} · {r.saddr}→{r.daddr}:{r.dport}' for r in top.itertuples()]
-        ypos = np.arange(len(top))                       # numeric rows: duplicate names must not merge
-        fig, ax = plt.subplots(figsize=(9, 0.3 * len(top) + 1.4))
-        ax.barh(ypos, top['beta_l34'], color=C34, label='L3/4 host view')
-        ax.barh(ypos, top['beta_l7'], left=top['beta_l34'], color=C7, label='L7 service view')
-        ax.set_yticks(ypos, names)
-        ax.set_xlim(0, 1); ax.axvline(0.5, color='white', lw=1)
-        ax.set_xlabel('share of attention'); ax.tick_params(axis='y', labelsize=7)
-        ax.legend(loc='lower right', fontsize=8)
-        ax.set_title(f'Top {len(top)} alerts by {pcol}')
-        fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'top_alerts.png'), dpi=150); plt.close(fig)
+    # D3) score distribution per original label
+    labs = df.groupby('label')[pcol].median().sort_values().index.tolist()
+    fig, ax = plt.subplots(figsize=(8, 0.42 * len(labs) + 1.6))
+    ax.boxplot([df.loc[df['label'] == l, pcol] for l in labs], orientation='horizontal', showfliers=False)
+    ax.set_yticks(range(1, len(labs) + 1), _lab_ticks(labs))
+    ax.set_xlim(0, 1); ax.set_xlabel(pcol)
+    ax.set_title(f'[{view}] score distribution per label (test)')
+    fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'score_by_class.png'), dpi=150); plt.close(fig)
+    written.append('score_by_class.png')
 
-    # 4) confidence vs view
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for lab, sub in df.groupby('label'):
-        ax.scatter(sub['beta_l7'], sub[pcol], s=6, alpha=.5, label=f'{lab} (n={len(sub)})')
-    ax.axvline(0.5, color='grey', ls='--', lw=1)
-    ax.set_xlim(0, 1); ax.set_xlabel('L7 view weight'); ax.set_ylabel(pcol)
-    ax.legend(fontsize=7, markerscale=2, loc='best')
-    ax.set_title('Model confidence vs view attention (test set)')
-    fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'p_vs_view.png'), dpi=150); plt.close(fig)
-    print(f'  figures: {out_dir}/view_by_class.png, view_hist.png, top_alerts.png, p_vs_view.png')
+    # ---- attention attribution: only when both views ran (beta is not None) ----------
+    if has_beta:
+        # 1) per attack label: which view drives the alerts
+        if len(al):
+            albs = al.groupby('label')['beta_l7'].median().sort_values().index.tolist()
+            fig, ax = plt.subplots(figsize=(8, 0.45 * len(albs) + 1.6))
+            ax.boxplot([al.loc[al['label'] == l, 'beta_l7'] for l in albs], orientation='horizontal', showfliers=False)
+            ax.set_yticks(range(1, len(albs) + 1), [f'{l} (n={int((al["label"] == l).sum())})' for l in albs])
+            ax.axvline(0.5, color='grey', ls='--', lw=1)
+            ax.set_xlim(0, 1)
+            ax.set_xlabel('L7 view weight  (0 = all L3/4, 1 = all L7)')
+            ax.set_title('Which view drives the alerts, per true label')
+            fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'view_by_class.png'), dpi=150); plt.close(fig)
+            written.append('view_by_class.png')
+
+        # 2) distribution: alerts vs non-alerts
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bins = np.linspace(0, 1, 41)
+        ax.hist(df.loc[~df['is_alert'], 'beta_l7'], bins=bins, alpha=.6, label='not alerted', color='#999999')
+        if len(al):
+            ax.hist(al['beta_l7'], bins=bins, alpha=.7, label='alerts', color=C7)
+        ax.axvline(0.5, color='black', ls='--', lw=1)
+        ax.set_xlabel('L7 view weight'); ax.set_ylabel('flows'); ax.legend()
+        ax.set_title('Per-flow view attention (test set)')
+        fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'view_hist.png'), dpi=150); plt.close(fig)
+        written.append('view_hist.png')
+
+        # 3) top alerts as stacked bars
+        if len(al):
+            top = al.sort_values(pcol, ascending=False).head(30).iloc[::-1]
+            names = [f'#{r.flow_idx} {r.label} · {r.saddr}→{r.daddr}:{r.dport}' for r in top.itertuples()]
+            ypos = np.arange(len(top))                   # numeric rows: duplicate names must not merge
+            fig, ax = plt.subplots(figsize=(9, 0.3 * len(top) + 1.4))
+            ax.barh(ypos, top['beta_l34'], color=C34, label='L3/4 host view')
+            ax.barh(ypos, top['beta_l7'], left=top['beta_l34'], color=C7, label='L7 service view')
+            ax.set_yticks(ypos, names)
+            ax.set_xlim(0, 1); ax.axvline(0.5, color='white', lw=1)
+            ax.set_xlabel('share of attention'); ax.tick_params(axis='y', labelsize=7)
+            ax.legend(loc='lower right', fontsize=8)
+            ax.set_title(f'Top {len(top)} alerts by {pcol}')
+            fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'top_alerts.png'), dpi=150); plt.close(fig)
+            written.append('top_alerts.png')
+
+        # 4) confidence vs view
+        fig, ax = plt.subplots(figsize=(7, 5))
+        for lab, sub in df.groupby('label'):
+            ax.scatter(sub['beta_l7'], sub[pcol], s=6, alpha=.5, label=f'{lab} (n={len(sub)})')
+        ax.axvline(0.5, color='grey', ls='--', lw=1)
+        ax.set_xlim(0, 1); ax.set_xlabel('L7 view weight'); ax.set_ylabel(pcol)
+        ax.legend(fontsize=7, markerscale=2, loc='best')
+        ax.set_title('Model confidence vs view attention (test set)')
+        fig.tight_layout(); fig.savefig(os.path.join(out_dir, 'p_vs_view.png'), dpi=150); plt.close(fig)
+        written.append('p_vs_view.png')
+
+    print('  figures: ' + ', '.join(f'{out_dir}/{f}' for f in written))
 
 
 def main():
@@ -496,12 +552,13 @@ def main():
     ap.add_argument('--epochs', type=int, default=100)
     ap.add_argument('--lr', type=float, default=5e-3)
     ap.add_argument('--explain', metavar='DIR',
-                    help='write per-alert L3/4-vs-L7 view attention (explanations.csv + PNGs) for the test set '
-                         'of the first seed; needs --views both, not with --sweep')
+                    help='write explanations.csv + PNGs for the test set of the first seed. Works for any '
+                         '--views: single views (l34/l7/none) get diagnostic plots (per-class detection, '
+                         'score separation); --views both also gets the L3/4-vs-L7 attention attribution. '
+                         'Not with --sweep')
     a = ap.parse_args()
     seeds = [int(s) for s in a.seeds.split(',') if s.strip()]
-    assert not a.explain or (a.views == 'both' and not a.sweep), \
-        '--explain needs --views both and cannot be combined with --sweep'
+    assert not (a.explain and a.sweep), '--explain cannot be combined with --sweep'
     if a.device == 'cuda':
         assert torch.cuda.is_available(), '--device cuda but no CUDA device is available'
         dev = torch.device('cuda')

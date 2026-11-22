@@ -41,8 +41,11 @@ spec:
             capabilities: { add: ["NET_RAW", "NET_ADMIN"] }
           command: ["/bin/sh", "-c"]
           args:
+            # -s 128: capture L3/4 headers only (payloads are mTLS-encrypted and unused by Argus).
+            # pcap records each packet's ORIGINAL wire length separately, so byte/packet counts stay
+            # correct; this is ~10x smaller than -s 0 (full payload) -- 47 GB sessions become a few GB.
             - >
-              exec tcpdump -i bridge -s 0 -U
+              exec tcpdump -i bridge -s 128 -U
               -G 300 -w /cap/bridge_%Y%m%d-%H%M%S.pcap
               -Z root 'not port 15012 and not port 15014'
           volumeMounts: [{ name: cap, mountPath: /cap }]
@@ -53,7 +56,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - >
-              exec tcpdump -i eth0 -s 0 -U
+              exec tcpdump -i eth0 -s 128 -U
               -G 300 -w /cap/eth0_%Y%m%d-%H%M%S.pcap
               -Z root 'not port 22'
           volumeMounts: [{ name: cap, mountPath: /cap }]

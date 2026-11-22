@@ -13,7 +13,7 @@
 # Then:
 #   ./06_build_and_compare.sh                 # build missing datasets + l34/l7/both compare
 #   ./06_build_and_compare.sh --sweep         # full 7-config table (adds shuffled/random controls)
-#   ./06_build_and_compare.sh --explain       # also write per-alert view attention for the test set
+#   ./06_build_and_compare.sh --explain       # also write explain PNGs per view (test/explain/{l34,l7,both}/)
 #   ./06_build_and_compare.sh --drop_strong   # drop the sttl/dttl giveaway (harder task)
 #   ./06_build_and_compare.sh --rebuild       # rebuild datasets even if they already exist
 #   ./06_build_and_compare.sh --max-normal N  # cap the normal class per split (default 150000; 0 = off)
@@ -132,11 +132,10 @@ if [[ $SWEEP == 1 ]]; then
 else
     for V in l34 l7 both; do
         echo; echo "===== views=$V ====="
-        "$PY" "$HERE/two_view_hetero_gat.py" "${COMMON[@]}" --views "$V"
+        EX=()
+        [[ $EXPLAIN == 1 ]] && EX=(--explain "$TEST_DIR/explain/$V")
+        "$PY" "$HERE/two_view_hetero_gat.py" "${COMMON[@]}" --views "$V" "${EX[@]}"
     done
-    if [[ $EXPLAIN == 1 ]]; then
-        echo; echo "===== per-alert view attention (both) -> $TE/explain ====="
-        "$PY" "$HERE/two_view_hetero_gat.py" "${COMMON[@]}" --views both --explain "$TEST_DIR/explain"
-    fi
+    [[ $EXPLAIN == 1 ]] && echo && echo "explain figures written per view under $TEST_DIR/explain/{l34,l7,both}/"
 fi
 echo; echo "==> done."

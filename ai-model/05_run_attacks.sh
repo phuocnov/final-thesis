@@ -140,8 +140,14 @@ finalize() {
     echo; echo "==> finalize (stop capture, fetch pcaps, remove attacker)"
     [[ -n "$STREAM_PID" ]] && kill "$STREAM_PID" 2>/dev/null || true
     if [[ $DRY == 0 ]]; then
-        "$HERE/03_capture_pcap.sh" fetch "$OUT/pcaps" >/dev/null 2>&1 || true
-        "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+        echo "  fetching pcaps (this can take a while)..."
+        if "$HERE/03_capture_pcap.sh" fetch "$OUT/pcaps"; then
+            "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+            "$HERE/03_capture_pcap.sh" clean || true   # pcaps copied -> free the node's hostPath
+        else
+            echo "  warn: fetch failed; keeping node pcaps (not cleaned). Retry: ./03_capture_pcap.sh fetch $OUT/pcaps" >&2
+            "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+        fi
         kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null 2>&1 || true
     fi
 }
