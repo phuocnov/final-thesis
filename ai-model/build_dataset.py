@@ -20,10 +20,12 @@ Inputs
 Outputs (written to --out_dir)
   requests.csv           one row per observed request/connection, labeled
   flows.csv               caller_ip/callee_pod pairs aggregated into time buckets
-  observed_services.graphml   nodes = services seen, edges = observed calls
+  observed_services.graphml   nodes = services seen, edges = observed calls (read by the model)
+  observed_services_yed.graphml  same graph with yFiles labels/colors/layout, for viewing in yEd
 
 Usage
   python build_dataset.py --logs logs --pods pods_*.json --labels labels.csv --out_dir dataset
+  python build_dataset.py --to_yed dataset/observed_services.graphml   # yEd copy of an existing file
   python build_dataset.py --selftest     # parser unit test on synthetic data, no cluster needed
 """
 import argparse
@@ -308,9 +310,68 @@ def build_service_graph(df):
     return g
 
 
+_Y = 'http://www.yworks.com/xml/graphml'
+_G = 'http://graphml.graphdrawing.org/xmlns'
+
+
+def _node_color(name):
+    if name.startswith('istio-ingressgateway'):
+        return '#F4A261'                          # ingress gateway
+    if name.startswith('external:') or name == 'unknown':
+        return '#E76F51'                          # unresolved / outside caller
+    if name == 'loadgenerator':
+        return '#A8DADC'                          # baseline traffic source
+    return '#8ECAE6'                              # Online Boutique service
+
+
+def write_yed_graphml(g, path):
+    """Write a yEd/yFiles-styled copy of the service graph (labeled, colored, laid out).
+    The plain observed_services.graphml has no yFiles graphics, so yEd stacks every node
+    at (0,0) as one unlabeled box. The model keeps reading the plain file; this copy is
+    only for viewing."""
+    import math
+    import xml.etree.ElementTree as ET
+    ET.register_namespace('', _G)
+    ET.register_namespace('y', _Y)
+    root = ET.Element(f'{{{_G}}}graphml')
+    ET.SubElement(root, f'{{{_G}}}key', {'id': 'ng', 'for': 'node', 'yfiles.type': 'nodegraphics'})
+    ET.SubElement(root, f'{{{_G}}}key', {'id': 'eg', 'for': 'edge', 'yfiles.type': 'edgegraphics'})
+    ET.SubElement(root, f'{{{_G}}}key', {'id': 'w', 'for': 'edge', 'attr.name': 'weight', 'attr.type': 'long'})
+    graph = ET.SubElement(root, f'{{{_G}}}graph', {'id': 'G', 'edgedefault': 'directed'})
+
+    pos = nx.spring_layout(g, seed=0, k=1.5) if g.number_of_nodes() else {}
+    for n in g.nodes():
+        x, y = pos.get(n, (0.0, 0.0))
+        w, h = max(90.0, 7.5 * len(str(n)) + 20), 34.0
+        node = ET.SubElement(graph, f'{{{_G}}}node', {'id': str(n)})
+        sn = ET.SubElement(ET.SubElement(node, f'{{{_G}}}data', {'key': 'ng'}), f'{{{_Y}}}ShapeNode')
+        ET.SubElement(sn, f'{{{_Y}}}Geometry', {'x': f'{x * 600 - w / 2:.1f}', 'y': f'{y * 450 - h / 2:.1f}',
+                                                 'width': f'{w:.1f}', 'height': f'{h:.1f}'})
+        ET.SubElement(sn, f'{{{_Y}}}Fill', {'color': _node_color(str(n)), 'transparent': 'false'})
+        ET.SubElement(sn, f'{{{_Y}}}BorderStyle', {'color': '#333333', 'type': 'line', 'width': '1.0'})
+        ET.SubElement(sn, f'{{{_Y}}}NodeLabel', {'fontSize': '12', 'modelName': 'internal',
+                                                  'modelPosition': 'c'}).text = str(n)
+        ET.SubElement(sn, f'{{{_Y}}}Shape', {'type': 'roundrectangle'})
+
+    for i, (u, v, d) in enumerate(g.edges(data=True)):
+        wt = int(d.get('weight', 1) or 1)
+        edge = ET.SubElement(graph, f'{{{_G}}}edge', {'id': f'e{i}', 'source': str(u), 'target': str(v)})
+        ET.SubElement(edge, f'{{{_G}}}data', {'key': 'w'}).text = str(wt)
+        pl = ET.SubElement(ET.SubElement(edge, f'{{{_G}}}data', {'key': 'eg'}), f'{{{_Y}}}PolyLineEdge')
+        ET.SubElement(pl, f'{{{_Y}}}LineStyle', {'color': '#555555', 'type': 'line',
+                                                  'width': f'{1 + math.log10(max(wt, 1)):.2f}'})
+        ET.SubElement(pl, f'{{{_Y}}}Arrows', {'source': 'none', 'target': 'standard'})
+        ET.SubElement(pl, f'{{{_Y}}}EdgeLabel', {'fontSize': '10'}).text = str(wt)
+        ET.SubElement(pl, f'{{{_Y}}}BendStyle', {'smoothed': 'false'})
+
+    ET.ElementTree(root).write(path, encoding='utf-8', xml_declaration=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--selftest', action='store_true')
+    ap.add_argument('--to_yed', metavar='FILE.graphml',
+                    help='convert an existing observed_services.graphml to a yEd-styled <FILE>_yed.graphml and exit')
     ap.add_argument('--logs', default='logs')
     ap.add_argument('--pods', nargs='+', default=['pods_*.json'])
     ap.add_argument('--labels', default='labels.csv')
@@ -320,6 +381,12 @@ def main():
 
     if a.selftest:
         return _selftest()
+    if a.to_yed:
+        g = nx.read_graphml(a.to_yed)
+        out = os.path.splitext(a.to_yed)[0] + '_yed.graphml'
+        write_yed_graphml(g, out)
+        print(f'wrote {out} ({g.number_of_nodes()} services, {g.number_of_edges()} edges)')
+        return
 
     pod_maps = load_pod_maps(a.pods)
     labels = load_labels(a.labels)
@@ -339,9 +406,11 @@ def main():
     flows.to_csv(os.path.join(a.out_dir, 'flows.csv'), index=False)
     g = build_service_graph(df)
     nx.write_graphml(g, os.path.join(a.out_dir, 'observed_services.graphml'))
+    write_yed_graphml(g, os.path.join(a.out_dir, 'observed_services_yed.graphml'))
     print(f'wrote {a.out_dir}/requests.csv ({len(df)} rows), '
           f'{a.out_dir}/flows.csv ({len(flows)} rows), '
-          f'{a.out_dir}/observed_services.graphml ({g.number_of_nodes()} services, {g.number_of_edges()} edges)')
+          f'{a.out_dir}/observed_services.graphml ({g.number_of_nodes()} services, {g.number_of_edges()} edges), '
+          f'{a.out_dir}/observed_services_yed.graphml (yEd view)')
 
 
 def _selftest():
@@ -460,6 +529,18 @@ def _selftest():
 
     g = build_service_graph(df)
     assert ('external:10.244.0.1', 'frontend') in g.edges(), list(g.edges())
+
+    # yEd copy: every node carries a ShapeNode label with its service name
+    import xml.etree.ElementTree as ET
+    yed_path = os.path.join(tmp, 'observed_services_yed.graphml')
+    write_yed_graphml(g, yed_path)
+    yroot = ET.parse(yed_path).getroot()
+    ynodes = yroot.findall(f'.//{{{_G}}}node')
+    assert len(ynodes) == g.number_of_nodes(), (len(ynodes), g.number_of_nodes())
+    for nd in ynodes:
+        lbl = nd.find(f'.//{{{_Y}}}NodeLabel')
+        assert lbl is not None and lbl.text == nd.get('id'), nd.get('id')
+    assert len(yroot.findall(f'.//{{{_G}}}edge')) == g.number_of_edges()
 
     print('selftest OK')
     print(df[['ts', 'direction', 'record_type', 'is_entry', 'caller_service',

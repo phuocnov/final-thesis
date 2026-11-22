@@ -14,6 +14,9 @@
 #
 # Usage:
 #   ./05_run_attacks.sh                           # full suite, 2 rounds, bounded-safe
+#   ./05_run_attacks.sh --split train --rounds 2  # training session (dir: session_train_<UTC>)
+#   ./05_run_attacks.sh --split val   --rounds 1  # validation session (its own data)
+#   ./05_run_attacks.sh --split test  --rounds 1  # test session (its own data)
 #   ./05_run_attacks.sh --only brute_force,port_scan --rounds 1
 #   ./05_run_attacks.sh --no-l34                  # L7 application attacks only
 #   ./05_run_attacks.sh --intense                 # full-force floods (can crash 1 node)
@@ -37,9 +40,11 @@ NO_L34=0
 BUILD=0          # --build: build the dataset after the session
 TRAIN=0          # --train: build + train the model (implies BUILD)
 SWEEP=0          # --sweep: with --train, run the full comparison table
+SPLIT=train      # --split train|val|test: names the session dir + records the role
+MIN_FLOWS=50     # --min_flows N: warn if a selected attack yields fewer labeled flows
 ONLY=""
 SKIP=""
-OUT="$HERE/session_$(date -u +%Y%m%dT%H%M%SZ)"
+OUT=""           # default computed after arg parsing (depends on --split); --out overrides
 NS=default
 GW_HOST="istio-ingressgateway.istio-system.svc.cluster.local"   # L7 target (gateway path)
 POD=attacker
@@ -59,6 +64,8 @@ while [[ $# -gt 0 ]]; do
         --only) ONLY="$2"; shift 2 ;;
         --skip) SKIP="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
+        --split) SPLIT="$2"; shift 2 ;;
+        --min_flows) MIN_FLOWS="$2"; shift 2 ;;
         --intense) INTENSE=1; shift ;;
         --no-l34) NO_L34=1; shift ;;
         --build) BUILD=1; shift ;;
@@ -69,6 +76,8 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; usage 2 ;;
     esac
 done
+case "$SPLIT" in train|val|test) ;; *) echo "--split must be train|val|test (got '$SPLIT')" >&2; exit 2 ;; esac
+[[ -n "$OUT" ]] || OUT="$HERE/session_${SPLIT}_$(date -u +%Y%m%dT%H%M%SZ)"
 PY="$HERE/.venv/bin/python"   # the venv has pandas/networkx/torch; system python does not
 
 csv() { local IFS=,; echo "$*"; }
@@ -98,24 +107,24 @@ label_of() { [[ "$1" == "http_flood_low" ]] && echo http_flood || echo "$1"; }
 attack_cmd() {
     local a="$1" ua; ua="atk-$(label_of "$a")"
     case "$a" in
-    http_flood)      if [[ $INTENSE == 1 ]]; then echo "wrk -t4 -c 100 -d ${DUR}s -H 'User-Agent: $ua' http://$GW_HOST/";
-                     else echo "wrk -t2 -c 20 -d ${DUR}s -H 'User-Agent: $ua' http://$GW_HOST/"; fi ;;
-    http_flood_low)  echo "timeout -s INT $DUR sh -c 'while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST/; sleep 1; done'" ;;
-    fuzzing)         echo "ffuf -u http://$GW_HOST/FUZZ -w /tmp/fuzz.txt -H 'User-Agent: $ua' -rate $([[ $INTENSE == 1 ]] && echo 0 || echo 50) -maxtime $DUR -s" ;;
-    injection)       echo "timeout -s INT $DUR sh -c 'while read p; do curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST/product/\$p\"; curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST/?q=\$p\"; done < /tmp/inj.txt; exit 0'" ;;
-    brute_force)     echo "timeout -s INT $DUR sh -c 'i=0; while :; do i=\$((i+1)); curl -s -o /dev/null -A \"$ua\" -XPOST http://$GW_HOST/login -H \"Content-Type: application/json\" -d \"{\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"wrong\$i\\\"}\"; done'" ;;
+    http_flood)      if [[ $INTENSE == 1 ]]; then echo "wrk -t4 -c 100 -d ${DUR}s -H 'User-Agent: $ua' http://$GW_HOST:80/";
+                     else echo "timeout -s INT $DUR sh -c 'i=0; while [ \$i -lt 10 ]; do ( while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST:80/; done ) & i=\$((i+1)); done; wait'"; fi ;;
+    http_flood_low)  echo "timeout -s INT $DUR sh -c 'while :; do curl -s -o /dev/null -A \"$ua\" http://$GW_HOST:80/; sleep 1; done'" ;;
+    fuzzing)         echo "timeout -s INT $DUR sh -c 'while :; do ffuf -u http://$GW_HOST:80/FUZZ -w /tmp/fuzz.txt -H \"User-Agent: $ua\" -rate $([[ $INTENSE == 1 ]] && echo 0 || echo 50) -maxtime $DUR -s; done'" ;;
+    injection)       echo "timeout -s INT $DUR sh -c 'while :; do while read p; do curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST:80/product/\$p\"; curl -s -o /dev/null -A \"$ua\" \"http://$GW_HOST:80/?q=\$p\"; done < /tmp/inj.txt; done'" ;;
+    brute_force)     echo "timeout -s INT $DUR sh -c 'i=0; while :; do i=\$((i+1)); curl -s -o /dev/null -A \"$ua\" -XPOST http://$GW_HOST:80/login -H \"Content-Type: application/json\" -d \"{\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"wrong\$i\\\"}\"; done'" ;;
     malformed_http)  echo "timeout -s INT $DUR sh -c 'while :; do printf \"GARBAGE /\\\\r\\\\n\\\\r\\\\n\" | ncat -w1 $GW_HOST 80; done'" ;;
-    slow_http)       echo "slowhttptest -c $([[ $INTENSE == 1 ]] && echo 1000 || echo 200) -H -i 10 -r 50 -u http://$GW_HOST/ -l $DUR" ;;
-    port_scan)       if [[ $INTENSE == 1 ]]; then echo "nmap -sS -Pn -T4 -p- \$TGT";
-                     else echo "nmap -sT -Pn -T3 --max-rate 200 -p 1-1024,3550,5050,5000,7000,7070,8080,9555,50051,6379 \$TGT"; fi ;;
-    conn_flood)      if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 -S -p 8080 --flood \$TGT";
-                     else echo "timeout -s INT $DUR hping3 -S -p 8080 -i u5000 \$TGT"; fi ;;
-    syn_flood)       if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 -S -p 80 --flood \$TGT";
-                     else echo "timeout -s INT $DUR hping3 -S -p 80 -i u2000 \$TGT"; fi ;;
-    udp_flood)       if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 --udp -p 53 --flood \$TGT";
-                     else echo "timeout -s INT $DUR hping3 --udp -p 53 -i u2000 \$TGT"; fi ;;
-    icmp_flood)      if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 --icmp --flood \$TGT";
-                     else echo "timeout -s INT $DUR hping3 --icmp -i u2000 \$TGT"; fi ;;
+    slow_http)       echo "slowhttptest -c $([[ $INTENSE == 1 ]] && echo 1000 || echo 200) -H -i 10 -r 50 -u http://$GW_HOST:80/ -l $DUR" ;;
+    port_scan)       if [[ $INTENSE == 1 ]]; then echo "nmap -sS -Pn -T4 -p- $TGT";
+                     else echo "nmap -sT -Pn -T3 --max-rate 200 -p 1-1024,3550,5050,5000,7000,7070,8080,9555,50051,6379 $TGT"; fi ;;
+    conn_flood)      if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 -S -p 8080 --flood $TGT";
+                     else echo "timeout -s INT $DUR hping3 -S -p 8080 -i u5000 $TGT"; fi ;;
+    syn_flood)       if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 -S -p 80 --flood $TGT";
+                     else echo "timeout -s INT $DUR hping3 -S -p 80 -i u2000 $TGT"; fi ;;
+    udp_flood)       if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 --udp -p 53 --flood $TGT";
+                     else echo "timeout -s INT $DUR hping3 --udp -p 53 -i u2000 $TGT"; fi ;;
+    icmp_flood)      if [[ $INTENSE == 1 ]]; then echo "timeout -s INT $DUR hping3 --icmp --flood $TGT";
+                     else echo "timeout -s INT $DUR hping3 --icmp -i u2000 $TGT"; fi ;;
     *) echo "echo 'unknown attack $a'; false" ;;
     esac
 }
@@ -131,8 +140,14 @@ finalize() {
     echo; echo "==> finalize (stop capture, fetch pcaps, remove attacker)"
     [[ -n "$STREAM_PID" ]] && kill "$STREAM_PID" 2>/dev/null || true
     if [[ $DRY == 0 ]]; then
-        "$HERE/03_capture_pcap.sh" fetch "$OUT/pcaps" >/dev/null 2>&1 || true
-        "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+        echo "  fetching pcaps (this can take a while)..."
+        if "$HERE/03_capture_pcap.sh" fetch "$OUT/pcaps"; then
+            "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+            "$HERE/03_capture_pcap.sh" clean || true   # pcaps copied -> free the node's hostPath
+        else
+            echo "  warn: fetch failed; keeping node pcaps (not cleaned). Retry: ./03_capture_pcap.sh fetch $OUT/pcaps" >&2
+            "$HERE/03_capture_pcap.sh" stop  >/dev/null 2>&1 || true
+        fi
         kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null 2>&1 || true
     fi
 }
@@ -142,6 +157,7 @@ trap finalize EXIT INT TERM
 SEL="$(build_selection)"
 [[ -z "${SEL// }" ]] && { echo "no attacks selected" >&2; exit 2; }
 echo "session out : $OUT"
+echo "split       : $SPLIT  (min_flows=$MIN_FLOWS)"
 echo "attacks     :$SEL"
 echo "rounds      : $ROUNDS | dur ${DUR}s | gap ${GAP}s | intense=$INTENSE | l34=$([[ $NO_L34 == 1 ]] && echo off || echo on)"
 echo "post        : build=$BUILD train=$TRAIN sweep=$SWEEP"
@@ -163,7 +179,8 @@ if [[ $DRY == 0 && ( $BUILD == 1 || $TRAIN == 1 ) ]]; then
     fi
 fi
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$OUT/attacks"
+echo "$SPLIT" > "$OUT/split.txt"
 LABELS="$OUT/labels.csv"
 echo 'start_time,end_time,label,source_ip,match_ua,notes' > "$LABELS"
 
@@ -173,14 +190,14 @@ add_label() {   # add_label <start> <end> <label> <src> <ua> <notes>
 
 if [[ $DRY == 1 ]]; then
     echo; echo "=== DRY RUN (nothing executed) ==="
-    TGT="<frontend-pod-ip>"
+    TGT="<frontend-pod-ip>"; ATTACKER_IP="<attacker-pod-ip>"
     for r in $(seq 1 "$ROUNDS"); do
         for a in $SEL; do
-            cmd="$(attack_cmd "$a")"
-            echo "--- round $r / $a  [$([[ $(ua_label "$a"; echo $?) == 0 ]] && echo match_ua=atk-$(label_of "$a") || echo source_ip=$TGT)]"
+            cmd="$(attack_cmd "$a")"; lbl="$(label_of "$a")"; ua=""
+            ua_label "$a" && ua="atk-$lbl"
+            echo "--- round $r / $a  [source_ip=$ATTACKER_IP${ua:+ match_ua=$ua}]"
             echo "    kubectl exec $POD -- sh -c \"$cmd\""
-            if ua_label "$a"; then add_label "<start>" "<end>" "$(label_of "$a")" "" "atk-$(label_of "$a")" "dry round $r";
-            else add_label "<start>" "<end>" "$(label_of "$a")" "$TGT" "" "dry round $r"; fi
+            add_label "<start>" "<end>" "$lbl" "$ATTACKER_IP" "$ua" "dry round $r"
         done
     done
     echo; echo "would write labels.csv:"; cat "$LABELS"
@@ -188,7 +205,7 @@ if [[ $DRY == 1 ]]; then
         echo; echo "then the pipeline would run (venv python):"
         echo "    $PY build_dataset.py --logs $OUT/logs --pods '$OUT/pods_*.json' --labels $OUT/labels.csv --out_dir $OUT/dataset"
         echo "    ./04_pcap_to_flows.sh $OUT/pcaps $OUT/labels.csv $OUT/dataset/netflows.csv"
-        [[ $TRAIN == 1 ]] && echo "    $PY two_view_hetero_gat.py --netflows $OUT/dataset/netflows.csv --graphml $OUT/dataset/observed_services.graphml --views both$([[ $SWEEP == 1 ]] && echo ' --sweep')"
+        [[ $TRAIN == 1 ]] && echo "    $PY two_view_hetero_gat.py --netflows $OUT/dataset/netflows.csv --graphml $OUT/dataset/observed_services.graphml --views both$([[ $SWEEP == 1 ]] && echo ' --sweep' || echo " --explain $OUT/explain")"
     fi
     exit 0
 fi
@@ -252,14 +269,25 @@ sleep 5     # a little clean baseline before the first attack
 
 # ---- run the attacks ------------------------------------------------------------
 run_attack() {
-    local a="$1" r="$2" cmd start end lbl
+    local a="$1" r="$2" cmd start end lbl log elapsed note ua=""
     cmd="$(attack_cmd "$a")"; lbl="$(label_of "$a")"
-    echo "  [round $r] $a (${DUR}s)"
+    log="$OUT/attacks/r${r}_${a}.log"
+    echo "  [round $r] $a (${DUR}s)  -> ${log#$OUT/}"
     start="$(now_ms)"
-    kubectl -n "$NS" exec "$POD" -- sh -c "$cmd" >/dev/null 2>&1 || true
+    kubectl -n "$NS" exec "$POD" -- sh -c "$cmd" >"$log" 2>&1 || true
     end="$(now_ms)"
-    if ua_label "$a"; then add_label "$start" "$end" "$lbl" "" "atk-$lbl" "round$r"
-    else add_label "$start" "$end" "$lbl" "$ATTACKER_IP" "" "round$r"; fi
+    # elapsed seconds (integer) from the millisecond marks; warn if the attack died early
+    elapsed=$(( ( $(date -u -d "$end" +%s) - $(date -u -d "$start" +%s) ) ))
+    note="round$r"
+    if (( elapsed < DUR / 3 )); then
+        echo "     WARN: $a ended after ${elapsed}s (expected ~${DUR}s) -- see $log" >&2
+        note="round${r};short"
+    fi
+    # Always record the attacker source_ip (the pcap labeler keys on it, so only the
+    # attacker's own flows are tagged -- not normal background in the window). L7 attacks
+    # ALSO carry match_ua=atk-<label>, which build_dataset.py keys the L7 label on.
+    ua_label "$a" && ua="atk-$lbl"
+    add_label "$start" "$end" "$lbl" "$ATTACKER_IP" "$ua" "$note"
 }
 
 for r in $(seq 1 "$ROUNDS"); do
@@ -286,6 +314,23 @@ if [[ $BUILD == 1 || $TRAIN == 1 ]]; then
         echo; echo "==> [2/3] build L3/4 dataset (04_pcap_to_flows.sh -> netflows.csv)"
         "$HERE/04_pcap_to_flows.sh" "$OUT/pcaps" "$LABELS" "$OUT/dataset/netflows.csv" \
             || { echo "04_pcap_to_flows failed; session + L7 dataset kept at $OUT" >&2; exit 1; }
+        # "enough data?" check: warn for any SELECTED attack with < MIN_FLOWS labeled flows
+        "$PY" - "$OUT/dataset/netflows.csv" "$MIN_FLOWS" "$SEL" <<'PY' || true
+import csv, sys
+from collections import Counter
+path, min_flows, sel = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
+sel = {a if a != 'http_flood_low' else 'http_flood' for a in sel}
+c = Counter()
+with open(path) as f:
+    for row in csv.DictReader(f):
+        c[(row.get('label') or 'normal').strip()] += 1
+print('netflow label counts:', dict(c))
+low = [a for a in sorted(sel) if c.get(a, 0) < min_flows]
+if low:
+    print(f'WARN: under {min_flows} flows for: ' +
+          ', '.join(f'{a}={c.get(a,0)}' for a in low) +
+          ' -- raise --rounds/--dur or check its attacks/ log', file=sys.stderr)
+PY
     else
         echo; echo "==> [2/3] skipped netflows (no flowtools:local image) -- L7 dataset only"
     fi
@@ -294,7 +339,7 @@ if [[ $BUILD == 1 || $TRAIN == 1 ]]; then
         echo; echo "==> [3/3] train (two_view_hetero_gat.py)"
         "$PY" two_view_hetero_gat.py --netflows "$OUT/dataset/netflows.csv" \
             --graphml "$OUT/dataset/observed_services.graphml" --views both \
-            $([[ $SWEEP == 1 ]] && echo --sweep) \
+            $([[ $SWEEP == 1 ]] && echo --sweep || echo --explain "$OUT/explain") \
             || { echo "training failed; dataset kept at $OUT/dataset" >&2; exit 1; }
     fi
     echo; echo "==> pipeline done. outputs in: $OUT/dataset"

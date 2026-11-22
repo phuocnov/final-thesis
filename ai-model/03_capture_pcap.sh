@@ -8,6 +8,7 @@
 #   ./03_capture_pcap.sh fetch [DIR]    # copy pcaps off the node into DIR (default: pcaps)
 #   ./03_capture_pcap.sh stop           # delete the capture pod (pcaps stay on the node
 #                                       # until the pod's hostPath is cleared)
+#   ./03_capture_pcap.sh clean          # purge the node's /var/log/pcap-capture (after fetch!)
 #
 # Typical session:
 #   ./03_capture_pcap.sh start          # BEFORE any traffic/attacks
@@ -32,7 +33,19 @@ start() {
 
 stop() {
     kubectl -n "$NS" delete -f "$HERE/capture-daemonset.yaml" --ignore-not-found
-    echo "capture stopped. (pcaps remain under /var/log/pcap-capture on the node)"
+    echo "capture stopped. (pcaps remain under /var/log/pcap-capture on the node; run 'clean' to purge)"
+}
+
+# Purge the leftover pcaps on the node (hostPath). Run AFTER fetch -- this deletes the
+# node copy. Best-effort: only works on the minikube driver; otherwise it warns.
+clean() {
+    if command -v minikube >/dev/null 2>&1 && kubectl config current-context 2>/dev/null | grep -qx minikube; then
+        minikube ssh -- 'sudo rm -rf /var/log/pcap-capture/*' 2>/dev/null \
+            && echo "node pcaps purged (/var/log/pcap-capture)" \
+            || echo "warn: could not purge /var/log/pcap-capture on the node" >&2
+    else
+        echo "warn: not a minikube context; clear the node's /var/log/pcap-capture manually" >&2
+    fi
 }
 
 fetch() {
@@ -51,6 +64,7 @@ case "${1:-}" in
     start) start ;;
     stop)  stop ;;
     fetch) shift; fetch "$@" ;;
+    clean) clean ;;
     mark)  shift; mark "$@" ;;
-    *) echo "usage: $0 {start|stop|fetch [DIR]|mark \"<note>\"}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|fetch [DIR]|clean|mark \"<note>\"}" >&2; exit 2 ;;
 esac
